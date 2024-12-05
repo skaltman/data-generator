@@ -5,19 +5,25 @@ library(janitor)
 library(shinychat)
 library(bslib)
 library(tibble)
+library(dplyr)
+library(ggplot2)
 library(dotenv)
 
-source("helper.R") # Ensure helper.R contains the functions `generate_data()` and `preprocess_csv()`
+source("helper.R")
 
 ui <- page_sidebar(
+  title = "Data Simulator",
   sidebar =
     sidebar(
-      shinychat::chat_ui("chat"), # Chat is the main interaction point
+      shinychat::chat_ui("chat"),
       downloadButton("download_csv", "Download CSV")
     ),
   card(
     card_header("Data preview"),
     DTOutput("data_preview")
+  ),
+  card(
+    plotOutput("plot")
   )
 )
 
@@ -27,6 +33,8 @@ server <- function(input, output, session) {
     system_prompt = paste(collapse = "\n", readLines("data-prompt.md", warn = FALSE)),
     echo = "none"
   )
+
+  chat_append("chat", "Describe the data you want to generate.")
 
   data <- reactiveVal()
 
@@ -50,7 +58,7 @@ server <- function(input, output, session) {
   # Render the updated dataset preview
   output$data_preview <- renderDT({
     req(data())
-    datatable(data())
+    datatable(data(), filter = "none")
   })
 
   # File download handler
@@ -62,6 +70,29 @@ server <- function(input, output, session) {
       write.csv(data(), file, row.names = FALSE)
     }
   )
+
+  output$plot <- renderPlot({
+    df <- data()
+    req(df)
+
+    numeric_cols <-
+      df |>
+      select(where(is.numeric))  |>
+      names()
+
+    if (length(numeric_cols) >= 1) {
+      ggplot(df, aes_string(x = numeric_cols[2])) +
+        geom_histogram(bins = 20) +
+        labs(x = numeric_cols[2]) +
+        theme_minimal()
+    } else {
+      ggplot() +
+        annotate("text", x = 1, y = 1, label = "Not enough numeric variables to plot",
+                 size = 5, color = "red") +
+        theme_void() +
+        theme(plot.title = element_text(hjust = 0.5))
+    }
+  })
 }
 
 shinyApp(ui = ui, server = server)
