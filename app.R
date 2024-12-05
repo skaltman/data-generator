@@ -41,7 +41,7 @@ ui <- page_sidebar(
 server <- function(input, output, session) {
   chat <- chat_openai(
     model = "gpt-4o-mini",
-    system_prompt = paste(collapse = "\n", readLines("data-prompt.md", warn = FALSE)),
+    system_prompt = paste(collapse = "\n", readLines("prompt.md", warn = FALSE)),
     echo = "none"
   )
 
