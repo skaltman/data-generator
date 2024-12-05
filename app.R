@@ -8,8 +8,14 @@ library(tibble)
 library(dplyr)
 library(ggplot2)
 library(dotenv)
+library(thematic)
 
-source("helper.R")
+# source("helper.R")
+
+preprocess_csv <- function(csv_string) {
+  csv_string <- gsub("\\\\n", "\n", csv_string)
+  read.csv(text = csv_string) |> as_tibble()
+}
 
 ui <- page_sidebar(
   title = "Data Simulator",
@@ -18,12 +24,19 @@ ui <- page_sidebar(
       shinychat::chat_ui("chat"),
       downloadButton("download_csv", "Download CSV")
     ),
-  card(
-    card_header("Data preview"),
-    DTOutput("data_preview")
-  ),
-  card(
-    plotOutput("plot")
+  layout_column_wrap(
+    card(
+      card_header("Data preview"),
+      DTOutput("data_preview")
+    ),
+    card(
+      card_header("Plot"),
+      layout_column_wrap(
+        selectInput("plot_var_x", "X-axis variable:", choices = NULL),
+        selectInput("plot_var_y", "Y-axis variable:", choices = NULL),
+      ),
+      plotOutput("plot")
+    )
   )
 )
 
@@ -55,6 +68,14 @@ server <- function(input, output, session) {
     shinychat::chat_append("chat", summary)
   })
 
+  observe({
+    updateSelectInput(session, "plot_var_x", choices = colnames(data()))
+  })
+
+  observe({
+    updateSelectInput(session, "plot_var_y", choices = colnames(data()))
+  })
+
   # Render the updated dataset preview
   output$data_preview <- renderDT({
     req(data())
@@ -74,24 +95,30 @@ server <- function(input, output, session) {
   output$plot <- renderPlot({
     df <- data()
     req(df)
+    req(input$plot_var_x)
+    req(input$plot_var_y)
 
-    numeric_cols <-
-      df |>
-      select(where(is.numeric))  |>
-      names()
-
-    if (length(numeric_cols) >= 1) {
-      ggplot(df, aes_string(x = numeric_cols[2])) +
-        geom_histogram(bins = 20) +
-        labs(x = numeric_cols[2]) +
-        theme_minimal()
+    if (is.numeric(df[[input$plot_var_x]]) & is.numeric(df[[input$plot_var_y]])) {
+        geom <- geom_point
+    } else if (is.numeric(df[[input$plot_var_x]]) | is.numeric(df[[input$plot_var_y]])) {
+      geom <- geom_boxplot
     } else {
-      ggplot() +
-        annotate("text", x = 1, y = 1, label = "Not enough numeric variables to plot",
-                 size = 5, color = "red") +
-        theme_void() +
-        theme(plot.title = element_text(hjust = 0.5))
+      geom <- geom_count
     }
+
+    tryCatch(
+      {
+        p <-
+          ggplot(df, aes_string(x = input$plot_var_x, y = input$plot_var_y)) +
+          geom() +
+          theme_minimal()
+      },
+      error = function(e) {
+        stop(e)
+      }
+    )
+
+    p
   })
 }
 
