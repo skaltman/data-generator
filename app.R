@@ -1,123 +1,161 @@
 library(shiny)
-library(elmer)
-library(DT)
-library(janitor)
-library(shinychat)
 library(bslib)
-library(tibble)
-library(dplyr)
+library(promises)
+library(fastmap)
+library(duckdb)
+library(DBI)
+library(fontawesome)
+library(DT)
+library(here)
+library(plotly)
 library(ggplot2)
+library(ggridges)
+library(dplyr)
+library(elmer)
+library(shinychat)
 library(dotenv)
-library(thematic)
 
-preprocess_csv <- function(csv_string) {
-  csv_string <- gsub("\\\\n", "\n", csv_string)
-  read.csv(text = csv_string) |> as_tibble()
-}
+# Open the duckdb database
+conn <- dbConnect(duckdb(), dbdir = ":memory:", read_only = FALSE)
+# Close the database when the app stops
+onStop(\() dbDisconnect(conn))
+
+openai_model <- "gpt-4o"
+
+system_prompt_str <- readLines(here("prompt.md"), warn = FALSE)
+
+icon_explain <- tags$img(src = "stars.svg")
 
 ui <- page_sidebar(
-  title = "Data Simulator",
-  sidebar =
-    sidebar(
-      shinychat::chat_ui("chat"),
-      downloadButton("download_csv", "Download CSV")
-    ),
-  layout_column_wrap(
+  style = "background-color: rgb(248, 248, 248);",
+  title = "LLM Data Simulator",
+  includeCSS(here("styles.css")),
+  sidebar = sidebar(
+    width = 400,
+    style = "height: 100%;",
+    chat_ui("chat", height = "100%", fill = TRUE)
+  ),
+  useBusyIndicators(),
+
+  layout_columns(
+    style = "min-height: 450px;",
+
+    # 🔍 Data table
     card(
+      style = "height: 500px;",
       card_header("Data preview"),
-      DTOutput("data_preview")
-    ),
-    card(
-      card_header("Plot"),
-      layout_column_wrap(
-        selectInput("plot_var_x", "X-axis variable:", choices = NULL),
-        selectInput("plot_var_y", "Y-axis variable:", choices = NULL),
-      ),
-      plotOutput("plot")
+      DTOutput("table")
     )
   )
 )
 
 server <- function(input, output, session) {
-  chat <- chat_openai(
-    model = "gpt-4o-mini",
-    system_prompt = paste(collapse = "\n", readLines("prompt.md", warn = FALSE)),
-    echo = "none"
-  )
+  # 🔄 Reactive state/computation --------------------------------------------
 
-  chat_append("chat", "Describe the data you want to generate.")
-
+  # current_query <- reactiveVal("")
   data <- reactiveVal()
 
-  observeEvent(input$chat_user_input, {
-    user_input <- input$chat_user_input
-    prompt <- paste(
-      "Generate a fake dataset with at least two variables as a CSV string based on this description:",
-      user_input,
-      "Include a header row. Ensure all rows have the same number of columns. Do not include any additional text or explanations."
-    )
+  # This object must always be passed as the `.ctx` argument to query(), so that
+  # tool functions can access the context they need to do their jobs; in this
+  # case, the database connection that query() needs.
+  ctx <- list(conn = conn)
 
-    csv_string <- chat$chat(prompt)
-    new_data <- preprocess_csv(csv_string)
-    data(new_data)
+  # 🔍 Data table ------------------------------------------------------------
 
-    summary <- chat$chat("Either 1) Summarize the data or the changes you made to the data or 2) Answer the user's question, whichever is most applicable.")
-    shinychat::chat_append("chat", csv_string)
-    shinychat::chat_append("chat", summary)
-  })
-
-  observe({
-    updateSelectInput(session, "plot_var_x", choices = colnames(data()))
-  })
-
-  observe({
-    updateSelectInput(session, "plot_var_y", choices = colnames(data()))
-  })
-
-  # Render the updated dataset preview
-  output$data_preview <- renderDT({
+  output$table <- renderDT({
     req(data())
     datatable(data(), filter = "none")
   })
 
-  # File download handler
-  output$download_csv <- downloadHandler(
-    filename = function() {
-      paste("dataset", Sys.Date(), ".csv", sep = "_")
-    },
-    content = function(file) {
-      write.csv(data(), file, row.names = FALSE)
-    }
-  )
 
-  output$plot <- renderPlot({
-    df <- data()
-    req(df)
-    req(input$plot_var_x)
-    req(input$plot_var_y)
+  # ✨ Sidebot ✨ -------------------------------------------------------------
 
-    if (is.numeric(df[[input$plot_var_x]]) & is.numeric(df[[input$plot_var_y]])) {
-        geom <- geom_point
-    } else if (is.numeric(df[[input$plot_var_x]]) | is.numeric(df[[input$plot_var_y]])) {
-      geom <- geom_boxplot
-    } else {
-      geom <- geom_count
-    }
+  append_output <- function(...) {
+    txt <- paste0(...)
+    shinychat::chat_append_message(
+      "chat",
+      list(role = "assistant", content = txt),
+      chunk = TRUE,
+      operation = "append",
+      session = session
+    )
+  }
+
+  #' Creates a new table in a database using the given SQL query.
+  #' @param query A DuckDB SQL query; must be a CREATE TABLE statement.
+  #' @returns A string representing the query
+  simulate_data <- function(query) {
+    print("in simulate data")
+    start <- Sys.time()
+    # append_output("\n```sql\n", query, "\n```\n\n")
 
     tryCatch(
       {
-        p <-
-          ggplot(df, aes_string(x = input$plot_var_x, y = input$plot_var_y)) +
-          geom() +
-          theme_minimal()
+        print("in the try catch")
+        # Try it to see if it errors; if so, the LLM will see the error
+        dbExecute(conn, query)
+        print("code executed")
       },
-      error = function(e) {
-        stop(e)
+      error = function(err) {
+        print("in the error")
+        # append_output("> Error: ", conditionMessage(err), "\n\n")
+        stop(err)
       }
     )
 
-    p
+    if (!is.null(query)) {
+      df <- dbGetQuery(conn, "SELECT * FROM data")
+      data(df)
+      end <- Sys.time()
+      print(start - end)
+      return(query)
+    }
+  }
+
+  #' Updates an existing table in a database using the given SQL query.
+  #' @param query A DuckDB SQL query; must be an UPDATE or ALTER statement.
+  #' @returns A string representing the query
+  update_data <- function(query) {
+
+    tryCatch(
+      {
+        # Try it to see if it errors; if so, the LLM will see the error
+        dbExecute(conn, query)
+      },
+      error = function(err) {
+        # append_output("> Error: ", conditionMessage(err), "\n\n")
+        stop(err)
+      }
+    )
+
+    if (!is.null(query)) {
+      df <- dbGetQuery(conn, "SELECT * FROM data")
+      data(df)
+      return(query)
+    }
+  }
+
+  chat <- chat_openai(model = openai_model, system_prompt = system_prompt_str)
+
+  chat_append("chat", "Describe a data set you want to simulate.")
+
+  chat$register_tool(tool(
+    simulate_data,
+    "Creates a new table in the database using the provided SQL statement.",
+    query = type_string("A DuckDB SQL query.")
+  ))
+
+  chat$register_tool(tool(
+    update_data,
+    "Updates the existing `data` table in the database using the provided SQL statement.",
+    query = type_string("A DuckDB SQL query.")
+  ))
+
+  observeEvent(input$chat_user_input, {
+    stream <- chat$stream_async(input$chat_user_input)
+    chat_append("chat", stream)
   })
+
 }
 
-shinyApp(ui = ui, server = server)
+shinyApp(ui, server)
